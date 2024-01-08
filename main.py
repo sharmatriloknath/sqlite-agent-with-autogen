@@ -3,10 +3,11 @@ from utlities.sqlite import SQLiteManager
 from utlities import llm
 import dotenv
 import argparse
+import autogen
 
 dotenv.load_dotenv()
 
-assert os.environ.get("DB_URL"), "SQLITE_CONNECTION_URL not found in .env file"
+assert os.environ.get("DB_URL"), "DB_URL not found in .env file"
 assert os.environ.get(
     "OPENAI_API_KEY"
 ), "OPENAI_API_KEY not found in .env file"
@@ -16,7 +17,6 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 
 SQLITE_TABLE_DEFINITIONS_CAP_REF = "TABLE_DEFINITIONS"
 RESPONSE_FORMAT_CAP_REF = "RESPONSE_FORMAT"
-
 SQL_DELIMITER = "---------"
 
 
@@ -43,33 +43,111 @@ def main():
             table_definitions,
         )
 
-        prompt = llm.add_cap_ref(
-            prompt,
-            f"\n\nRespond in this format {RESPONSE_FORMAT_CAP_REF}. Replace the text between <> with it's request. I need to be able to easily parse the sql query from your response.",
-            RESPONSE_FORMAT_CAP_REF,
-            f"""<explanation of the sql query>
-{SQL_DELIMITER}
-<sql query exclusively as raw text>""",
+        # build the gpt_configuration object
+        gpt4_config = {
+            # "use_cache": False, # Not supported anymore..
+            "temperature": 0,
+            "config_list": autogen.config_list_from_models(["gpt-4"]),
+            "timeout": 120,
+            "functions": [
+                {
+                    "name": "run_sql",
+                    "description": "Run a SQL query against the sqlite database",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "sql": {
+                                "type": "string",
+                                "description": "The SQL query to run",
+                            }
+                        },
+                        "required": ["sql"],
+                    },
+                }
+            ],
+        }
+
+        # build the function map
+        function_map = {
+            "run_sql": db.run_sql,
+        }
+
+        # create our terminate msg function
+        def is_termination_msg(content):
+            have_content = content.get("content", None) is not None
+            if have_content and "APPROVED" in content["content"]:
+                return True
+            return False
+
+        COMPLETION_PROMPT = "If everything looks good, respond with APPROVED"
+
+        USER_PROXY_PROMPT = (
+            "A human admin. Interact with the Product Manager to discuss the plan. Plan execution needs to be approved by this admin."
+            + COMPLETION_PROMPT
+        )
+        DATA_ENGINEER_PROMPT = (
+            "A Data Engineer. You follow an approved plan. Generate the initial SQL based on the requirements provided. Send it to the Sr Data Analyst to be executed."
+            + COMPLETION_PROMPT
+        )
+        SR_DATA_ANALYST_PROMPT = (
+            "Sr Data Analyst. You follow an approved plan. You run the SQL query, generate the response and send it to the product manager for final review."
+            + COMPLETION_PROMPT
+        )
+        PRODUCT_MANAGER_PROMPT = (
+            "Product Manager. Validate the response to make sure it's correct"
+            + COMPLETION_PROMPT
         )
 
-        print("\n\n-------- PROMPT --------")
-        print(prompt)
+        # create a set of agents with specific roles
+        # admin user proxy agent - takes in the prompt and manages the group chat
+        user_proxy = autogen.UserProxyAgent(
+            name="Admin",
+            system_message=USER_PROXY_PROMPT,
+            code_execution_config=False,
+            human_input_mode="NEVER",
+            is_termination_msg=is_termination_msg,
+        )
 
-        prompt_response = llm.prompt(prompt=prompt, model="gpt-3.5-turbo")
+        # data engineer agent - generates the sql query
+        data_engineer = autogen.AssistantAgent(
+            name="Engineer",
+            llm_config=gpt4_config,
+            system_message=DATA_ENGINEER_PROMPT,
+            code_execution_config=False,
+            human_input_mode="NEVER",
+            is_termination_msg=is_termination_msg,
+        )
 
-        print("\n\n-------- PROMPT RESPONSE --------")
-        print(prompt_response)
+        # sr data analyst agent - run the sql query and generate the response
+        sr_data_analyst = autogen.AssistantAgent(
+            name="Sr_Data_Analyst",
+            llm_config=gpt4_config,
+            system_message=SR_DATA_ANALYST_PROMPT,
+            code_execution_config=False,
+            human_input_mode="NEVER",
+            is_termination_msg=is_termination_msg,
+            function_map=function_map,
+        )
 
-        sql_query = prompt_response.split(SQL_DELIMITER)[1].strip()
+        # product manager - validate the response to make sure it's correct
+        product_manager = autogen.AssistantAgent(
+            name="Product_Manager",
+            llm_config=gpt4_config,
+            system_message=PRODUCT_MANAGER_PROMPT,
+            code_execution_config=False,
+            human_input_mode="NEVER",
+            is_termination_msg=is_termination_msg,
+        )
 
-        print(f"\n\n-------- PARSED SQL QUERY --------")
-        print(sql_query)
+        # create a group chat and initiate the chat.
+        groupchat = autogen.GroupChat(
+            agents=[user_proxy, data_engineer, sr_data_analyst, product_manager],
+            messages=[],
+            max_round=10,
+        )
+        manager = autogen.GroupChatManager(groupchat=groupchat, llm_config=gpt4_config)
 
-        result = db.run_sql(sql_query)
-
-        print("\n\n======== POSTGRES DATA ANALYTICS AI AGENT RESPONSE ========")
-
-        print(result)
+        user_proxy.initiate_chat(manager, clear_history=True, message=prompt)
 
 
 if __name__ == "__main__":

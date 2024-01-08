@@ -1,7 +1,7 @@
 import sqlite3
 from sqlite3 import Error
-
-# from sqlite_agent.main import DB_URL
+import json
+from datetime import datetime
 
 
 class SQLiteManager:
@@ -84,11 +84,12 @@ class SQLiteManager:
     
 
 if __name__=="__main__":
-    DB_URL = r"C:\Users\003EPO744\Desktop\LearningTechs\AutoGen\sqlite_agent\db.sqlite"
-    sqlite_obj = SQLiteManager()
 
-    sqlite_obj.connect_with_url(DB_URL)
-    print(f"{sqlite_obj.conn=}\n\n{sqlite_obj.cur}")
-    print(sqlite_obj.cur.execute("select count(*) from users"))
-    print(sqlite_obj.cur.fetchall())
+    # File path
+    DB_URL = "../db.sqlite"
+    
+    with SQLiteManager() as db:
+        db.connect_with_url(DB_URL)
+        print(db.cur.execute("select count(*) from users"))
+        print(db.cur.fetchall())
 
